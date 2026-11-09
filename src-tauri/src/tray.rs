@@ -75,18 +75,31 @@ pub fn show_in_dock(app: &AppHandle, visible: bool) {
 
 fn place_at_tray(app: &AppHandle, window: &WebviewWindow) -> Option<()> {
     let rect = app.tray_by_id("main")?.rect().ok()??;
-    let scale = window.scale_factor().ok()?;
-    let (tray, tray_size) = (rect.position.to_physical::<f64>(scale), rect.size.to_physical::<f64>(scale));
-    let size = window.outer_size().ok()?;
-    let (width, height) = (size.width as f64, size.height as f64);
-    let monitor = app.monitor_from_point(tray.x, tray.y).ok()??;
-    let (left, screen) = (monitor.position().x as f64, monitor.size());
-    let right = left + screen.width as f64 - width - 8.0;
-    let x = (tray.x + tray_size.width / 2.0 - width / 2.0).min(right).max(left + 8.0);
+    let (tray, tray_size) = (rect.position.to_physical::<f64>(1.0), rect.size.to_physical::<f64>(1.0));
+    let mid = PhysicalPosition::new(tray.x + tray_size.width / 2.0, tray.y + tray_size.height / 2.0);
+    // The rect is in its screen's pixels but macOS lays screens out in points, so `monitor_from_point` missed on
+    // Retina and the popover stayed centred. Test each screen in its own scale instead (exact on Windows too).
+    let (origin, screen, scale) = app.available_monitors().ok()?.into_iter().find_map(|m| {
+        let scale = m.scale_factor();
+        let (at, origin, screen) =
+            (mid.to_logical::<f64>(scale), m.position().to_logical::<f64>(scale), m.size().to_logical::<f64>(scale));
+        let inside = (origin.x..origin.x + screen.width).contains(&at.x)
+            && (origin.y..origin.y + screen.height).contains(&at.y);
+        inside.then_some((origin, screen, scale))
+    })?;
+    let (tray, tray_size) = (tray.to_logical::<f64>(scale), tray_size.to_logical::<f64>(scale));
+    let size = window.outer_size().ok()?.to_logical::<f64>(window.scale_factor().ok()?);
+    let right = origin.x + screen.width - size.width - 8.0;
+    let x = (tray.x + tray_size.width / 2.0 - size.width / 2.0).min(right).max(origin.x + 8.0);
     // macOS has the bar on top, Windows' taskbar is usually at the bottom.
-    let bottom_half = tray.y - monitor.position().y as f64 > screen.height as f64 / 2.0;
-    let y = if bottom_half { tray.y - height - 8.0 } else { tray.y + tray_size.height + 6.0 };
-    window.set_position(PhysicalPosition::new(x, y)).ok()
+    let bottom_half = tray.y - origin.y > screen.height / 2.0;
+    let y = if bottom_half { tray.y - size.height - 8.0 } else { tray.y + tray_size.height + 6.0 };
+    // macOS places windows in points, Windows in pixels of the screen they land on.
+    #[cfg(target_os = "macos")]
+    let at = tauri::Position::Logical(tauri::LogicalPosition::new(x, y));
+    #[cfg(not(target_os = "macos"))]
+    let at = tauri::Position::Physical(PhysicalPosition::new((x * scale) as i32, (y * scale) as i32));
+    window.set_position(at).ok()
 }
 
 fn show_popover(app: &AppHandle) {
